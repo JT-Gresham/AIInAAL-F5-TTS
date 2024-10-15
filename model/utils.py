@@ -22,12 +22,6 @@ from einops import rearrange, reduce
 
 import jieba
 from pypinyin import lazy_pinyin, Style
-import zhconv
-from zhon.hanzi import punctuation
-from jiwer import compute_measures
-
-from funasr import AutoModel
-from faster_whisper import WhisperModel
 
 from model.ecapa_tdnn import ECAPA_TDNN_SMALL
 from model.modules import MelSpec
@@ -129,13 +123,13 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
     tokenizer   - "pinyin" do g2p for only chinese characters, need .txt vocab_file
                 - "char" for char-wise tokenizer, need .txt vocab_file
                 - "byte" for utf-8 tokenizer
+                - "custom" if you're directly passing in a path to the vocab.txt you want to use
     vocab_size  - if use "pinyin", all available pinyin types, common alphabets (also those with accent) and symbols
                 - if use "char", derived from unfiltered character & symbol counts of custom dataset
                 - if use "byte", set to 256 (unicode byte range) 
     ''' 
     if tokenizer in ["pinyin", "char"]:
-        vocab_file_path = f"data/{dataset_name}_{tokenizer}/vocab.txt"
-        with open(vocab_file_path, "r", encoding="utf-8") as f:
+        with open (f"data/{dataset_name}_{tokenizer}/vocab.txt", "r", encoding="utf-8") as f:
             vocab_char_map = {}
             for i, char in enumerate(f):
                 vocab_char_map[char[:-1]] = i
@@ -145,6 +139,12 @@ def get_tokenizer(dataset_name, tokenizer: str = "pinyin"):
     elif tokenizer == "byte":
         vocab_char_map = None
         vocab_size = 256
+    elif tokenizer == "custom":
+        with open (dataset_name, "r", encoding="utf-8") as f:
+            vocab_char_map = {}
+            for i, char in enumerate(f):
+                vocab_char_map[char[:-1]] = i
+        vocab_size = len(vocab_char_map)
 
     return vocab_char_map, vocab_size
 
@@ -276,6 +276,8 @@ def get_inference_prompt(
             ref_audio = resampler(ref_audio)
 
         # Text
+        if len(prompt_text[-1].encode('utf-8')) == 1:
+            prompt_text = prompt_text + " "
         text = [prompt_text + gt_text]
         if tokenizer == "pinyin":
             text_list = convert_char_to_pinyin(text, polyphone = polyphone)
@@ -295,8 +297,8 @@ def get_inference_prompt(
             # ref_audio = gt_audio
         else:
             zh_pause_punc = r"。，、；：？！"
-            ref_text_len = len(prompt_text) + len(re.findall(zh_pause_punc, prompt_text))
-            gen_text_len = len(gt_text) + len(re.findall(zh_pause_punc, gt_text))
+            ref_text_len = len(prompt_text.encode('utf-8')) + 3 * len(re.findall(zh_pause_punc, prompt_text))
+            gen_text_len = len(gt_text.encode('utf-8')) + 3 * len(re.findall(zh_pause_punc, gt_text))
             total_mel_len = ref_mel_len + int(ref_mel_len / ref_text_len * gen_text_len / speed)
 
         # to mel spectrogram
@@ -424,6 +426,7 @@ def get_librispeech_test(metalst, gen_wav_dir, gpus, librispeech_test_clean_path
 
 def load_asr_model(lang, ckpt_dir = ""):
     if lang == "zh":
+        from funasr import AutoModel
         model = AutoModel(
             model = os.path.join(ckpt_dir, "paraformer-zh"), 
             # vad_model = os.path.join(ckpt_dir, "fsmn-vad"), 
@@ -432,6 +435,7 @@ def load_asr_model(lang, ckpt_dir = ""):
             disable_update=True,
             )  # following seed-tts setting
     elif lang == "en":
+        from faster_whisper import WhisperModel
         model_size = "large-v3" if ckpt_dir == "" else ckpt_dir
         model = WhisperModel(model_size, device="cuda", compute_type="float16")
     return model
@@ -443,6 +447,7 @@ def run_asr_wer(args):
     rank, lang, test_set, ckpt_dir = args
 
     if lang == "zh":
+        import zhconv
         torch.cuda.set_device(rank)
     elif lang == "en":
         os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
@@ -450,10 +455,12 @@ def run_asr_wer(args):
         raise NotImplementedError("lang support only 'zh' (funasr paraformer-zh), 'en' (faster-whisper-large-v3), for now.")
 
     asr_model = load_asr_model(lang, ckpt_dir = ckpt_dir)
-
+    
+    from zhon.hanzi import punctuation
     punctuation_all = punctuation + string.punctuation
     wers = []
 
+    from jiwer import compute_measures
     for gen_wav, prompt_wav, truth in tqdm(test_set):
         if lang == "zh":
             res = asr_model.generate(input=gen_wav, batch_size_s=300, disable_pbar=True)
@@ -546,3 +553,28 @@ def repetition_found(text, length = 2, tolerance = 10):
         if count > tolerance:
             return True
     return False
+
+
+# load model checkpoint for inference
+
+def load_checkpoint(model, ckpt_path, device, use_ema = True):
+    from ema_pytorch import EMA
+
+    ckpt_type = ckpt_path.split(".")[-1]
+    if ckpt_type == "safetensors":
+        from safetensors.torch import load_file
+        checkpoint = load_file(ckpt_path, device=device)
+    else:
+        checkpoint = torch.load(ckpt_path, map_location=device)
+
+    if use_ema == True:
+        ema_model = EMA(model, include_online_model = False).to(device)
+        if ckpt_type == "safetensors":
+            ema_model.load_state_dict(checkpoint)
+        else:
+            ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
+        ema_model.copy_params_from_ema_to_model()
+    else:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+    return model
