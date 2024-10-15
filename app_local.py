@@ -14,6 +14,7 @@ from pydub import AudioSegment
 from model import CFM, UNetT, DiT, MMDiT
 from cached_path import cached_path
 from model.utils import (
+    load_checkpoint,
     get_tokenizer,
     convert_char_to_pinyin,
     save_spectrogram,
@@ -23,8 +24,10 @@ import librosa
 import re
 import gc
 import matplotlib.pyplot as plt
+# import triton
+# import triton.language as tl
 
-device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda" 
 
 gc.collect()
 torch.cuda.empty_cache()
@@ -49,14 +52,13 @@ speed = 1.0
 # fix_duration = 27  # None or float (duration in seconds)
 fix_duration = None
 
-def load_model(exp_name, model_cls, model_cfg, ckpt_step):
-    checkpoint = torch.load(str(cached_path(f"hf://SWivid/F5-TTS/{exp_name}/model_{ckpt_step}.pt")), map_location=device)
+def load_model(repo_name, exp_name, model_cls, model_cfg, ckpt_step):
+    ckpt_path = str(cached_path(f"hf://SWivid/{repo_name}/{exp_name}/model_{ckpt_step}.safetensors"))
+    # ckpt_path = f"ckpts/{exp_name}/model_{ckpt_step}.pt"  # .pt | .safetensors
     vocab_char_map, vocab_size = get_tokenizer("Emilia_ZH_EN", "pinyin")
     model = CFM(
         transformer=model_cls(
-            **model_cfg,
-            text_num_embeds=vocab_size,
-            mel_dim=n_mel_channels
+            **model_cfg, text_num_embeds=vocab_size, mel_dim=n_mel_channels
         ),
         mel_spec_kwargs=dict(
             target_sample_rate=target_sample_rate,
@@ -69,33 +71,26 @@ def load_model(exp_name, model_cls, model_cfg, ckpt_step):
         vocab_char_map=vocab_char_map,
     ).to(device)
 
-    ema_model = EMA(model, include_online_model=False).to(device)
-    ema_model.load_state_dict(checkpoint['ema_model_state_dict'])
-    ema_model.copy_params_from_ema_to_model()
+    model = load_checkpoint(model, ckpt_path, device, use_ema = True)
 
-    return ema_model, model
+    return model
 
 def get_model(exp_name):
     if exp_name not in loaded_models:
         if exp_name == "F5-TTS":
-            model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-            ema_model, base_model = load_model("F5TTS_Base", DiT, model_cfg, 1200000)
+            F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
+            base_model = load_model("F5-TTS", "F5TTS_Base", DiT, F5TTS_model_cfg, 1200000)
         elif exp_name == "E2-TTS":
-            model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
-            ema_model, base_model = load_model("E2TTS_Base", UNetT, model_cfg, 1200000)
+            E2TTS_model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
+            base_model = load_model("E2-TTS", "E2TTS_Base", UNetT, E2TTS_model_cfg, 1200000)
         else:
             raise ValueError(f"Unknown model: {exp_name}")
         
-        loaded_models[exp_name] = (ema_model, base_model)
+        loaded_models[exp_name] = (base_model)
     
     return loaded_models[exp_name]
 
-# load models
-# F5TTS_model_cfg = dict(dim=1024, depth=22, heads=16, ff_mult=2, text_dim=512, conv_layers=4)
-# E2TTS_model_cfg = dict(dim=1024, depth=24, heads=16, ff_mult=4)
 
-# F5TTS_ema_model, F5TTS_base_model = load_model("F5TTS_Base", DiT, F5TTS_model_cfg, 1200000)
-# E2TTS_ema_model, E2TTS_base_model = load_model("E2TTS_Base", UNetT, E2TTS_model_cfg, 1200000)
 
 def chunk_text(text, max_chars=200):
     chunks = []
@@ -181,7 +176,7 @@ def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence):
         ref_audio = f.name
 
     # Load the selected model
-    ema_model, base_model = get_model(exp_name)
+    base_model = get_model(exp_name)
 
     # Transcribe reference audio if needed
     if not ref_text.strip():
