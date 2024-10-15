@@ -27,12 +27,14 @@ import matplotlib.pyplot as plt
 # import triton
 # import triton.language as tl
 
-device = "cuda" 
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 gc.collect()
 torch.cuda.empty_cache()
 
 print(f"Using {device} device")
+
+# os.environ['TORCHINDUCTOR_CXX'] = 'cl'
 
 # Global variables to store loaded models
 loaded_models = {}
@@ -89,7 +91,6 @@ def get_model(exp_name):
         loaded_models[exp_name] = (base_model)
     
     return loaded_models[exp_name]
-
 
 
 def chunk_text(text, max_chars=200):
@@ -152,9 +153,7 @@ def process_audio_with_pauses(audio_chunks, sample_rate, chunk_info, remove_sile
 
     return np.concatenate(processed_chunks)
 
-
-
-def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence):
+def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence, spectogram_choice):
     print(gen_text)
 
     chunks = chunk_text(gen_text)
@@ -207,8 +206,10 @@ def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence):
     if audio.shape[0] > 1:
         audio = torch.mean(audio, dim=0, keepdim=True)
     rms = torch.sqrt(torch.mean(torch.square(audio)))
+    target_rms = 0.01  # Example value, adjust as needed
     if rms < target_rms:
         audio = audio * target_rms / rms
+    target_sample_rate = 24000  # Example value, adjust as needed
     if sr != target_sample_rate:
         resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
         audio = resampler(audio)
@@ -263,27 +264,31 @@ def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence):
         results.append(generated_wave)
         chunk_info.append(is_new_paragraph)
 
-        # Generate spectrogram
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
-            spectrogram_path = tmp_spectrogram.name
-            save_spectrogram(generated_wave, target_sample_rate, spectrogram_path)
-        spectrograms.append(spectrogram_path)
+        # Generate spectrogram if requested
+        if spectogram_choice == "True":
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
+                spectrogram_path = tmp_spectrogram.name
+                save_spectrogram(generated_wave, target_sample_rate, spectrogram_path)
+            spectrograms.append(spectrogram_path)
 
         gc.collect()
         torch.cuda.empty_cache()
 
     # Process audio with pauses
     combined_audio = process_audio_with_pauses(results, target_sample_rate, chunk_info, remove_silence)
-    # Generate final spectrogram
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
-        final_spectrogram_path = tmp_spectrogram.name
-        save_spectrogram(combined_audio, target_sample_rate, final_spectrogram_path)
+    
+    # Generate final spectrogram if requested
+    final_spectrogram_path = None
+    if spectogram_choice == "True":
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_spectrogram:
+            final_spectrogram_path = tmp_spectrogram.name
+            save_spectrogram(combined_audio, target_sample_rate, final_spectrogram_path)
+
 
     gc.collect()
     torch.cuda.empty_cache()
 
-    return (target_sample_rate, combined_audio), final_spectrogram_path
-
+    return (target_sample_rate, combined_audio), final_spectrogram_path, ref_text
 
 with gr.Blocks() as app:
     gr.Markdown("""
@@ -306,15 +311,20 @@ If you're having issues, try converting your reference audio to WAV or MP3, clip
     ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
     gen_text_input = gr.Textbox(label="Text to Generate (for longer than 200 chars the app uses chunking)", lines=4)
     model_choice = gr.Radio(choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS")
+    spectogram_choice = gr.Radio(choices=["True", "False"], label="Output spectogram? (The audio generation might be faster without it)", value="True")
     generate_btn = gr.Button("Synthesize", variant="primary")
     with gr.Accordion("Advanced Settings", open=False):
-        ref_text_input = gr.Textbox(label="Reference Text", info="Leave blank to automatically transcribe the reference audio. If you enter text it will override automatic transcription.", lines=2)
+        ref_text_input = gr.Textbox(label="Reference Text", info="Leave blank to automatically transcribe the reference audio. If you enter text it will override automatic transcription.", lines=2, value='')
         remove_silence = gr.Checkbox(label="Remove Silences", info="The model tends to produce silences, especially on longer audio. We can manually remove silences if needed. Note that this is an experimental feature and may produce strange results. This will also increase generation time.", value=True)
     audio_output = gr.Audio(label="Synthesized Audio")
     spectrogram_output = gr.Image(label="Spectrogram")
 
-    generate_btn.click(infer, inputs=[ref_audio_input, ref_text_input, gen_text_input, model_choice, remove_silence], outputs=[audio_output, spectrogram_output])
-    gr.Markdown("Unofficial demo by [mrfakename](https://x.com/realmrfakename)")
+    def clear_ref_text(audio):
+        return "" # if audio else gr.Textbox.update()
 
+    ref_audio_input.change(fn=clear_ref_text, inputs=[ref_audio_input], outputs=[ref_text_input])
+
+    generate_btn.click(infer, inputs=[ref_audio_input, ref_text_input, gen_text_input, model_choice, remove_silence, spectogram_choice], outputs=[audio_output, spectrogram_output, ref_text_input])
+    gr.Markdown("Unofficial demo by [mrfakename](https://x.com/realmrfakename)")
 
 app.queue().launch()
