@@ -1,5 +1,5 @@
 
-## **This forked version introduces chunking of the input text, allowing for the generation of audio files of any length without limitations. Additionally, the VRAM usage remains under 8 GB.**
+## **This forked version introduces chunking of the input text, allowing for the generation of audio files of any length without limitations. Furthermore, when using Whisper-v3-turbo, the VRAM usage is approximately 6 GB, while inference without it requires less than 4 GB.**
 
 # F5-TTS: A Fairytaler that Fakes Fluent and Faithful Speech with Flow Matching
 
