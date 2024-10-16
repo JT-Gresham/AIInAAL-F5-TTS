@@ -24,6 +24,7 @@ import librosa
 import re
 import gc
 import matplotlib.pyplot as plt
+import time
 # import triton
 # import triton.language as tl
 
@@ -154,6 +155,7 @@ def process_audio_with_pauses(audio_chunks, sample_rate, chunk_info, remove_sile
     return np.concatenate(processed_chunks)
 
 def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence, spectogram_choice):
+    start_time = time.time()  # Start the timer
     print(gen_text)
 
     chunks = chunk_text(gen_text)
@@ -288,7 +290,10 @@ def infer(ref_audio_orig, ref_text, gen_text, exp_name, remove_silence, spectogr
     gc.collect()
     torch.cuda.empty_cache()
 
-    return (target_sample_rate, combined_audio), final_spectrogram_path, ref_text
+    end_time = time.time()  # End the timer
+    generation_time = end_time - start_time  # Calculate the total time taken
+
+    return (target_sample_rate, combined_audio), final_spectrogram_path, ref_text, f"Audio generation took {generation_time:.2f} seconds"
 
 with gr.Blocks() as app:
     gr.Markdown("""
@@ -311,20 +316,21 @@ If you're having issues, try converting your reference audio to WAV or MP3, clip
     ref_audio_input = gr.Audio(label="Reference Audio", type="filepath")
     gen_text_input = gr.Textbox(label="Text to Generate (for longer than 200 chars the app uses chunking)", lines=4)
     model_choice = gr.Radio(choices=["F5-TTS", "E2-TTS"], label="Choose TTS Model", value="F5-TTS")
-    spectogram_choice = gr.Radio(choices=["True", "False"], label="Output spectogram? (The audio generation might be faster without it)", value="True")
+    spectogram_choice = gr.Radio(choices=["True", "False"], label="Output spectrogram? (The audio generation might be faster without it)", value="True")
     generate_btn = gr.Button("Synthesize", variant="primary")
     with gr.Accordion("Advanced Settings", open=False):
         ref_text_input = gr.Textbox(label="Reference Text", info="Leave blank to automatically transcribe the reference audio. If you enter text it will override automatic transcription.", lines=2, value='')
         remove_silence = gr.Checkbox(label="Remove Silences", info="The model tends to produce silences, especially on longer audio. We can manually remove silences if needed. Note that this is an experimental feature and may produce strange results. This will also increase generation time.", value=True)
     audio_output = gr.Audio(label="Synthesized Audio")
     spectrogram_output = gr.Image(label="Spectrogram")
+    generation_time_output = gr.Textbox(label="Generation Time")  
 
     def clear_ref_text(audio):
         return "" # if audio else gr.Textbox.update()
 
     ref_audio_input.change(fn=clear_ref_text, inputs=[ref_audio_input], outputs=[ref_text_input])
 
-    generate_btn.click(infer, inputs=[ref_audio_input, ref_text_input, gen_text_input, model_choice, remove_silence, spectogram_choice], outputs=[audio_output, spectrogram_output, ref_text_input])
+    generate_btn.click(infer, inputs=[ref_audio_input, ref_text_input, gen_text_input, model_choice, remove_silence, spectogram_choice], outputs=[audio_output, spectrogram_output, ref_text_input, generation_time_output])
     gr.Markdown("Unofficial demo by [mrfakename](https://x.com/realmrfakename)")
 
 app.queue().launch()
