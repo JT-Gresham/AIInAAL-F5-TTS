@@ -3,6 +3,7 @@ print("WARNING: You are running this unofficial E2/F5 TTS demo locally, it may n
 import os
 import re
 import torch
+import intel_extensions_for_torch as ipex
 import torchaudio
 import gradio as gr
 import numpy as np
