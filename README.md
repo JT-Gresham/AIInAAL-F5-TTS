@@ -13,7 +13,7 @@
 ## Installation and running inference
 1. Clone this repository.
    ```
-   git clone https://github.com/PasiKoodaa/F5-TTS
+   git clone https://github.com/JT-Gresham/AIInAAL-F5-TTS
    cd F5-TTS
    ```
 
